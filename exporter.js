@@ -1,3 +1,5 @@
+// TODO Download the result as a file, rather than making the user copy and paste the message out.
+
 var outText = "";
 var objectIDAllocator = 1;
 

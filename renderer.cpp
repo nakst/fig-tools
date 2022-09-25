@@ -1,6 +1,6 @@
-// TODO [bin/render_vector res/FigmaTestDump.ini "Group 5" bin/test.png] is generating slightly transparent pixels around the text!?
 // TODO Text sizing is inaccurate.
 // TODO Shadow sizing/opacity is inaccurate.
+// TODO Better font loading; error reporting.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -102,46 +102,30 @@ void *LoadFile(const char *path, size_t *length) {
 
 void BlendPixel(uint32_t *destinationPixel, uint32_t modified) {
 	// TODO Is Figma doing gamma-correct blending?
-	// 	rast-full.cpp and textlib will also need to be updated.
+	// 	textlib will also need to be updated if so.
 
-	if ((modified & 0xFF000000) == 0xFF000000) {
-		*destinationPixel = modified;
-		return;
-	} else if ((modified & 0xFF000000) == 0x00000000) {
-		return;
+	float under0 = (float) ((*destinationPixel >>  0) & 0xFF) / 255.0f;
+	float under1 = (float) ((*destinationPixel >>  8) & 0xFF) / 255.0f;
+	float under2 = (float) ((*destinationPixel >> 16) & 0xFF) / 255.0f;
+	float underA = (float) ((*destinationPixel >> 24) & 0xFF) / 255.0f;
+	float over0  = (float) (( modified         >>  0) & 0xFF) / 255.0f;
+	float over1  = (float) (( modified         >>  8) & 0xFF) / 255.0f;
+	float over2  = (float) (( modified         >> 16) & 0xFF) / 255.0f;
+	float overA  = (float) (( modified         >> 24) & 0xFF) / 255.0f;
+
+	float resultA = 1.0f * overA + underA * (1.0f - overA);
+
+	if (resultA >= 0.00001f) {
+		float mix = overA / resultA;
+		float result0 = over0 * mix + under0 * (1.0f - mix);
+		float result1 = over1 * mix + under1 * (1.0f - mix);
+		float result2 = over2 * mix + under2 * (1.0f - mix);
+
+		*destinationPixel = ((uint32_t) (result0 * 255.0f) <<  0)
+		                  | ((uint32_t) (result1 * 255.0f) <<  8)
+		                  | ((uint32_t) (result2 * 255.0f) << 16)
+		                  | ((uint32_t) (resultA * 255.0f) << 24);
 	}
-
-	uint32_t m1, m2, a;
-	uint32_t original = *destinationPixel;
-
-	if ((*destinationPixel & 0xFF000000) != 0xFF000000) {
-		uint32_t alpha1 = (modified & 0xFF000000) >> 24;
-		uint32_t alpha2 = 255 - alpha1;
-		uint32_t alphaD = (original & 0xFF000000) >> 24;
-		uint32_t alphaD2 = alphaD * alpha2;
-		uint32_t alphaOut = alpha1 + (alphaD2 >> 8);
-
-		if (!alphaOut) {
-			return;
-		}
-
-		m2 = alphaD2 / alphaOut;
-		m1 = (alpha1 << 8) / alphaOut;
-		if (m2 == 0x100) m2--;
-		if (m1 == 0x100) m1--;
-		a = alphaOut << 24;
-	} else {
-		m1 = (modified & 0xFF000000) >> 24;
-		m2 = 255 - m1;
-		a = 0xFF000000;
-	}
-
-	uint32_t r2 = m2 * (original & 0x00FF00FF);
-	uint32_t g2 = m2 * (original & 0x0000FF00);
-	uint32_t r1 = m1 * (modified & 0x00FF00FF);
-	uint32_t g1 = m1 * (modified & 0x0000FF00);
-	uint32_t result = a | (0x0000FF00 & ((g1 + g2) >> 8)) | (0x00FF00FF & ((r1 + r2) >> 8));
-	*destinationPixel = result;
 }
 
 void Blit(Image *destination, Image *source, int32_t x0, int32_t y0, bool blend, float opacity) {
@@ -516,7 +500,7 @@ void RenderNode(const char *id, float drawXOffset, float drawYOffset, Image *des
 				float theta = atan2f(direction2.y, direction2.x) - atan2f(direction1.y, direction1.x);
 				float tanTheta = tanf(theta);
 				float dt = cornerRadius / tanTheta;
-				// TODO Clamp the cornerRadius (see Group 6).
+				// TODO Clamp the cornerRadius.
 				float dc = dt * tanTheta / sinf(theta);
 
 				PathAppendCorner(&path, { vertex1.x + direction0.x * dt, vertex1.y + direction0.y * dt },
@@ -643,7 +627,7 @@ void RenderNode(const char *id, float drawXOffset, float drawYOffset, Image *des
 
 			while (*characters != '"') {
 				if (*characters == '\\') {
-					// TODO Unicode.
+					// TODO Unicode sequences.
 					arrput(string, characters[1] == 'n' ? '\n' : characters[1]);
 					characters += 2;
 				} else {
@@ -970,15 +954,15 @@ int main(int argc, char **argv) {
 
 	{
 		const char *fontFiles[] = { 
-			"res/Fonts/Barlow-Thin.ttf", "res/Fonts/Barlow-ThinItalic.ttf",
+			"res/Fonts/Barlow-Thin.ttf",       "res/Fonts/Barlow-ThinItalic.ttf",
 			"res/Fonts/Barlow-ExtraLight.ttf", "res/Fonts/Barlow-ExtraLightItalic.ttf",
-			"res/Fonts/Barlow-Light.ttf", "res/Fonts/Barlow-LightItalic.ttf",
-			"res/Fonts/Barlow-Regular.ttf", "res/Fonts/Barlow-Italic.ttf",
-			"res/Fonts/Barlow-Medium.ttf", "res/Fonts/Barlow-MediumItalic.ttf",
-			"res/Fonts/Barlow-SemiBold.ttf", "res/Fonts/Barlow-SemiBoldItalic.ttf",
-			"res/Fonts/Barlow-Bold.ttf", "res/Fonts/Barlow-BoldItalic.ttf",
-			"res/Fonts/Barlow-ExtraBold.ttf", "res/Fonts/Barlow-ExtraBoldItalic.ttf",
-			"res/Fonts/Barlow-Black.ttf", "res/Fonts/Barlow-BlackItalic.ttf",
+			"res/Fonts/Barlow-Light.ttf",      "res/Fonts/Barlow-LightItalic.ttf",
+			"res/Fonts/Barlow-Regular.ttf",    "res/Fonts/Barlow-Italic.ttf",
+			"res/Fonts/Barlow-Medium.ttf",     "res/Fonts/Barlow-MediumItalic.ttf",
+			"res/Fonts/Barlow-SemiBold.ttf",   "res/Fonts/Barlow-SemiBoldItalic.ttf",
+			"res/Fonts/Barlow-Bold.ttf",       "res/Fonts/Barlow-BoldItalic.ttf",
+			"res/Fonts/Barlow-ExtraBold.ttf",  "res/Fonts/Barlow-ExtraBoldItalic.ttf",
+			"res/Fonts/Barlow-Black.ttf",      "res/Fonts/Barlow-BlackItalic.ttf",
 		};
 
 		const char *fontTypes[] = { 
@@ -998,15 +982,15 @@ int main(int argc, char **argv) {
 
 	{
 		const char *fontFiles[] = { 
-			"res/Fonts/Inter Thin.otf", "res/Fonts/Inter Thin Italic.otf",
+			"res/Fonts/Inter Thin.otf",        "res/Fonts/Inter Thin Italic.otf",
 			"res/Fonts/Inter Extra Light.otf", "res/Fonts/Inter Extra Light Italic.otf",
-			"res/Fonts/Inter Light.otf", "res/Fonts/Inter Light Italic.otf",
-			"res/Fonts/Inter Regular.otf", "res/Fonts/Inter Italic.otf",
-			"res/Fonts/Inter Medium.otf", "res/Fonts/Inter Medium Italic.otf",
-			"res/Fonts/Inter Semi Bold.otf", "res/Fonts/Inter Semi Bold Italic.otf",
-			"res/Fonts/Inter Bold.otf", "res/Fonts/Inter Bold Italic.otf",
-			"res/Fonts/Inter Extra Bold.otf", "res/Fonts/Inter Extra Bold Italic.otf",
-			"res/Fonts/Inter Black.otf", "res/Fonts/Inter Black Italic.otf",
+			"res/Fonts/Inter Light.otf",       "res/Fonts/Inter Light Italic.otf",
+			"res/Fonts/Inter Regular.otf",     "res/Fonts/Inter Italic.otf",
+			"res/Fonts/Inter Medium.otf",      "res/Fonts/Inter Medium Italic.otf",
+			"res/Fonts/Inter Semi Bold.otf",   "res/Fonts/Inter Semi Bold Italic.otf",
+			"res/Fonts/Inter Bold.otf",        "res/Fonts/Inter Bold Italic.otf",
+			"res/Fonts/Inter Extra Bold.otf",  "res/Fonts/Inter Extra Bold Italic.otf",
+			"res/Fonts/Inter Black.otf",       "res/Fonts/Inter Black Italic.otf",
 		};
 
 		const char *fontTypes[] = { 
@@ -1024,25 +1008,34 @@ int main(int argc, char **argv) {
 		TextAddFont("Inter", "Sans", "Latn,Grek,Cyrl", fontFiles, fontTypes, sizeof(fontFiles) / sizeof(fontFiles[0]));
 	}
 
+	Node *node = nullptr;
+
 	for (uintptr_t i = 0; i < shlenu(nodes); i++) {
 		const char *name = shget(nodes[i].value, "name");
 
 		if (name && 0 == strcmp(argv[2], name)) {
-			Image bitmap = {};
-			bitmap.width = atoi(shget(nodes[i].value, "width"));
-			bitmap.height = atoi(shget(nodes[i].value, "height"));
-			bitmap.bits = (uint32_t *) calloc(sizeof(uint32_t), bitmap.width * bitmap.height);
-			RenderNode(nodes[i].key, -atof(shget(nodes[i].value, "absoluteTransform02")), 
-					-atof(shget(nodes[i].value, "absoluteTransform12")), &bitmap);
-
-			for (uint32_t i = 0; i < bitmap.width * bitmap.height; i++) {
-				bitmap.bits[i] = (bitmap.bits[i] & 0xFF00FF00) | ((bitmap.bits[i] & 0xFF) << 16) | ((bitmap.bits[i] >> 16) & 0xFF);
-			}
-
-			stbi_write_png(argv[3], bitmap.width, bitmap.height, 4, bitmap.bits, bitmap.width * 4);
-			free(bitmap.bits);
+			node = &nodes[i];
 			break;
 		}
+	}
+
+	if (node) {
+		Image bitmap = {};
+		bitmap.width = atoi(shget(node->value, "width"));
+		bitmap.height = atoi(shget(node->value, "height"));
+		bitmap.bits = (uint32_t *) calloc(sizeof(uint32_t), bitmap.width * bitmap.height);
+		RenderNode(node->key, -atof(shget(node->value, "absoluteTransform02")), 
+				-atof(shget(node->value, "absoluteTransform12")), &bitmap);
+
+		for (uint32_t i = 0; i < bitmap.width * bitmap.height; i++) {
+			bitmap.bits[i] = (bitmap.bits[i] & 0xFF00FF00) | ((bitmap.bits[i] & 0xFF) << 16) | ((bitmap.bits[i] >> 16) & 0xFF);
+		}
+
+		stbi_write_png(argv[3], bitmap.width, bitmap.height, 4, bitmap.bits, bitmap.width * 4);
+		free(bitmap.bits);
+	} else {
+		fprintf(stderr, "Error: Node '%s' was not found in the input file.\n", argv[2]);
+		return 1;
 	}
 
 	for (uintptr_t i = 0; i < shlenu(nodes); i++) {
