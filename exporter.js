@@ -159,6 +159,7 @@ async function DumpNode(node, parentID) {
 	outText += "name=" + node.name + "\n";
 	outText += "parent=" + parentID.toString() + "\n";
 	outText += "children=" + childrenIDsArray.toString() + "\n";
+	outText += "isMask=" + node.isMask + "\n";
 
 	if (node.type == "BOOLEAN_OPERATION") {
 		outText += "booleanOperation=" + node.booleanOperation + "\n";

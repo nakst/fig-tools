@@ -86,6 +86,10 @@ bool INIParse(INIState *s) {
 	return false;
 }
 
+float FloatClampNonNegative(float x) {
+	return x >= 0.0f ? x : 0.0f;
+}
+
 void *LoadFile(const char *path, size_t *length) {
 	FILE *file = fopen(path, "rb");
 	if (!file) return NULL;
@@ -393,47 +397,154 @@ void Blur(float *buffer, uint32_t width, uint32_t height, float radius, bool cla
 	free(kernel);
 }
 
-void RenderNode(const char *id, float drawXOffset, float drawYOffset, Image *destinationBitmap) {
+void ComputeNodeTransform(const char *id, Matrix *_matrix, float *_width, float *_height, float *_offsetX, float *_offsetY) {
+	// TODO Could this function be merged with ComputeNodeDrawBounds?
+
+	Property *p = shget(nodes, id);
+
+	Matrix matrix = {};
+	float width = 0.0f, height = 0.0f, offsetX = 0.0f, offsetY = 0.0f;
+
+	if (shget(p, "absoluteTransform00")) {
+		matrix.m00 = atof(shget(p, "absoluteTransform00"));
+		matrix.m01 = atof(shget(p, "absoluteTransform01"));
+		matrix.m02 = 0.0f;
+		matrix.m10 = atof(shget(p, "absoluteTransform10"));
+		matrix.m11 = atof(shget(p, "absoluteTransform11"));
+		matrix.m12 = 0.0f;
+		width = atof(shget(p, "width"));
+		height = atof(shget(p, "height"));
+		offsetX = atof(shget(p, "absoluteTransform02"));
+		offsetY = atof(shget(p, "absoluteTransform12"));
+	}
+
+	if (_matrix) *_matrix = matrix;
+	if (_width) *_width = width;
+	if (_height) *_height = height;
+	if (_offsetX) *_offsetX = offsetX;
+	if (_offsetY) *_offsetY = offsetY;
+}
+
+void ComputeNodeDrawBounds(const char *id, float *_padL, float *_padR, float *_padT, float *_padB) {
+	// TODO Cache the results as this gets called many times for each node during tree traversal.
+
+	Property *p = shget(nodes, id);
+
+	Matrix matrix;
+	float width, height, offsetX, offsetY;
+	ComputeNodeTransform(id, &matrix, &width, &height, &offsetX, &offsetY);
+
+	const char *children = shget(p, "children");
+	const char *effects = shget(p, "effects");
+	const char *strokes = shget(p, "strokes");
+
+	float padL = 0, padR = 0, padT = 0, padB = 0;
+
+	{
+		RastVertex tvs[4] = {
+			Apply(matrix, {  0.0f,   0.0f }),
+			Apply(matrix, {  0.0f, height }),
+			Apply(matrix, { width,   0.0f }),
+			Apply(matrix, { width, height }),
+		};
+
+		for (uintptr_t i = 0; i < 4; i++) {
+			if (padL < -tvs[i].x) padL = -tvs[i].x;
+			if (padT < -tvs[i].y) padT = -tvs[i].y;
+			if (padR < tvs[i].x -  width) padR = tvs[i].x -  width;
+			if (padB < tvs[i].y - height) padB = tvs[i].y - height;
+		}
+	}
+
+	if (children) {
+		char *copy = strdup(children);
+		char *copyBase = copy;
+
+		while (*copy) {
+			const char *n = copy;
+			strtol(copy, &copy, 10);
+			if (*copy == ',') { *copy = 0; copy++; }
+
+			float cWidth, cHeight, cOffsetX, cOffsetY, cPadL, cPadR, cPadT, cPadB;
+			ComputeNodeTransform(n, nullptr, &cWidth, &cHeight, &cOffsetX, &cOffsetY);
+			ComputeNodeDrawBounds(n, &cPadL, &cPadR, &cPadT, &cPadB);
+			cOffsetX -= offsetX, cOffsetY -= offsetY;
+			RastVertex cvs[2] = { { cOffsetX - cPadL, cOffsetY - cPadT }, { cOffsetX + cWidth + cPadR, cOffsetY + cHeight + cPadB } };
+
+			for (uintptr_t i = 0; i < 2; i++) {
+				if (padL < -cvs[i].x) padL = -cvs[i].x;
+				if (padT < -cvs[i].y) padT = -cvs[i].y;
+				if (padR < cvs[i].x -  width) padR = cvs[i].x -  width;
+				if (padB < cvs[i].y - height) padB = cvs[i].y - height;
+			}
+		}
+
+		free(copyBase);
+	}
+
+	if (strokes) {
+		float strokeWeight = atof(shget(p, "strokeWeight"));
+		padL += strokeWeight;
+		padR += strokeWeight;
+		padT += strokeWeight;
+		padB += strokeWeight;
+	}
+
+	if (effects) {
+		char *copy = strdup(effects);
+		char *copyBase = copy;
+
+		float layerBlurRadius = 0.0f;
+
+		while (*copy) {
+			const char *n = copy;
+			strtol(copy, &copy, 10);
+			if (*copy == ',') { *copy = 0; copy++; }
+
+			Property *cp = shget(nodes, n);
+			const char *type = shget(cp, "type");
+
+			if (0 == strcmp(shget(cp, "visible"), "false")) {
+				// The effect is not visible.
+			} else if (0 == strcmp(type, "EFFECT.DROP_SHADOW") || 0 == strcmp(type, "EFFECT.INNER_SHADOW")) {
+				float offsetX = atoi(shget(cp, "offsetX"));
+				float offsetY = atoi(shget(cp, "offsetY"));
+				float radius = atof(shget(cp, "radius"));
+				float spread = atof(shget(cp, "spread"));
+				padL += FloatClampNonNegative(-offsetX + radius * 2.0f + spread);
+				padR += FloatClampNonNegative( offsetX + radius * 2.0f + spread);
+				padT += FloatClampNonNegative(-offsetY + radius * 2.0f + spread);
+				padB += FloatClampNonNegative( offsetY + radius * 2.0f + spread);
+			} else if (0 == strcmp(type, "EFFECT.LAYER_BLUR")) {
+				layerBlurRadius = atof(shget(cp, "radius")); // Process this last.
+			}
+		}
+
+		free(copyBase);
+
+		padL += layerBlurRadius *= 2.0f;
+		padR += layerBlurRadius *= 2.0f;
+		padT += layerBlurRadius *= 2.0f;
+		padB += layerBlurRadius *= 2.0f;
+	}
+
+	if (_padL) *_padL = ceilf(padL);
+	if (_padR) *_padR = ceilf(padR);
+	if (_padT) *_padT = ceilf(padT);
+	if (_padB) *_padB = ceilf(padB);
+}
+
+void RenderNode(const char *id, Image *clipBitmap, Image *destinationBitmap, const char *destinationPath, float parentOriginX, float parentOriginY) {
 	// TODO Clipping (including frames).
 	// TODO Gradient dithering.
 
 	Property *p = shget(nodes, id);
+	printf("%s\n", shget(p, "name"));
 
 	// Check the node is visible.
 
 	const char *visible = shget(p, "visible");
 	if (visible && 0 == strcmp(visible, "false")) return;
-
-	// Create the bitmap.
-
-	// TODO The bitmap may need to be larger than this, otherwise offset drop shadows will not be rendered correctly.
-	// 	In this case, the entire node needs to be visible, not just the portion that will be blitted onto the parent's buffer.
-	Image bitmap = {};
-	bitmap.width = destinationBitmap->width;
-	bitmap.height = destinationBitmap->height, 
-	bitmap.bits = (uint32_t *) calloc(4, destinationBitmap->width * destinationBitmap->height);
-	RastSurface surface = {};
-	surface.buffer = (uint32_t *) bitmap.bits;
-	surface.stride = bitmap.width * 4;
-	RastSurfaceInitialise(&surface, bitmap.width, bitmap.height, true);
-	RastSurface mask = {};
-	RastSurfaceInitialise(&mask, bitmap.width, bitmap.height, false);
-
-	// Get the transform.
-
-	Matrix matrix = {};
-	float width = 0.0f, height = 0.0f;
-
-	if (shget(p, "absoluteTransform00")) {
-		matrix.m00 = atof(shget(p, "absoluteTransform00"));
-		matrix.m01 = atof(shget(p, "absoluteTransform01"));
-		matrix.m02 = atof(shget(p, "absoluteTransform02")) + drawXOffset;
-		matrix.m10 = atof(shget(p, "absoluteTransform10"));
-		matrix.m11 = atof(shget(p, "absoluteTransform11"));
-		matrix.m12 = atof(shget(p, "absoluteTransform12")) + drawYOffset;
-		width = atof(shget(p, "width"));
-		height = atof(shget(p, "height"));
-	}
 
 	// Get the basic properties and arrays.
 
@@ -443,11 +554,28 @@ void RenderNode(const char *id, float drawXOffset, float drawYOffset, Image *des
 	const char *effects = shget(p, "effects");
 	const char *strokes = shget(p, "strokes");
 
-	RastPath path = {};
-	RastContourStyle contourStyle = {};
-	bool evenOdd = false;
+	// Get the transform.
+
+	Matrix matrix;
+	float width, height, offsetOnParentX, offsetOnParentY;
+	ComputeNodeTransform(id, &matrix, &width, &height, &offsetOnParentX, &offsetOnParentY);
+	offsetOnParentX -= parentOriginX;
+	offsetOnParentY -= parentOriginY;
+
+	// Compute the bounds in which the node can draw.
+
+	float padL, padR, padT, padB;
+	ComputeNodeDrawBounds(id, &padL, &padR, &padT, &padB);
+	matrix.m02 = padL;
+	matrix.m12 = padT;
+	offsetOnParentX -= padL;
+	offsetOnParentY -= padT;
 
 	// Set the path.
+	// This should fit inside the box with top-left corner (0,0) and bottom-right corner (width,height).
+
+	RastPath path = {};
+	bool evenOdd = false;
 
 	// TODO Corner smoothing, see https://www.figma.com/blog/desperately-seeking-squircles/.
 
@@ -561,7 +689,91 @@ void RenderNode(const char *id, float drawXOffset, float drawYOffset, Image *des
 		}
 
 		evenOdd = true;
-	} else if (0 == strcmp(type, "TEXT")) {
+	}
+
+	// Create the bitmaps.
+
+	Image bitmap = {};
+	bitmap.width = ceilf(width) + padL + padR;
+	bitmap.height = ceilf(height) + padT + padB;
+	bitmap.bits = (uint32_t *) calloc(4, bitmap.width * bitmap.height);
+	RastSurface surface = {};
+	surface.buffer = (uint32_t *) bitmap.bits;
+	surface.stride = bitmap.width * 4;
+	RastSurfaceInitialise(&surface, bitmap.width, bitmap.height, true);
+	RastSurface mask = {};
+	RastSurfaceInitialise(&mask, bitmap.width, bitmap.height, false);
+
+	Image bitmap2 = {};
+	bitmap2.width = bitmap.width;
+	bitmap2.height = bitmap.height;
+	bitmap2.bits = (uint32_t *) calloc(4, bitmap.width * bitmap.height);
+	memset(bitmap2.bits, 0xFF, 4 * bitmap.width * bitmap.height);
+
+	// Render fills.
+
+	if (fills) {
+		char *copy = strdup(fills);
+		char *copyBase = copy;
+
+		while (*copy) {
+			const char *n = copy;
+			strtol(copy, &copy, 10);
+			if (*copy == ',') { *copy = 0; copy++; }
+
+			uint32_t *image = nullptr;
+			RastPaint paint = LoadPaint(shget(nodes, n), matrix, width, height, &image);
+			RastSurfaceFill(surface, RastShapeCreateSolid(&path), paint, evenOdd);
+			RastSurfaceFill(mask, RastShapeCreateSolid(&path), { .type = RAST_PAINT_MAXIMUM_A }, evenOdd);
+			RastGradientDestroy(&paint);
+			free(image);
+		}
+
+		free(copyBase);
+	}
+
+	// Render strokes.
+
+	if (strokes) {
+		char *copy = strdup(strokes);
+		char *copyBase = copy;
+
+		float strokeWeight = atof(shget(p, "strokeWeight"));
+		const char *strokeAlign = shget(p, "strokeAlign");
+		const char *strokeJoin = shget(p, "strokeJoin");
+		const char *strokeCap = shget(p, "strokeCap");
+
+		RastContourStyle contourStyle = {};
+		contourStyle.internalWidth = 0 == strcmp(strokeAlign, "INSIDE") ? strokeWeight 
+			: 0 == strcmp(strokeAlign, "CENTER") ? strokeWeight * 0.5f : 0.0f;
+		contourStyle.externalWidth = 0 == strcmp(strokeAlign, "OUTSIDE") ? strokeWeight 
+			: 0 == strcmp(strokeAlign, "CENTER") ? strokeWeight * 0.5f : 0.0f;
+		contourStyle.miterLimit = 0 == strcmp(strokeJoin, "BEVEL") ? 0.0f : atof(shget(p, "strokeMiterLimit"));
+		contourStyle.joinMode = 0 == strcmp(strokeJoin, "ROUND") ? RAST_LINE_JOIN_ROUND : RAST_LINE_JOIN_MITER;
+		contourStyle.capMode = 0 == strcmp(strokeCap, "ROUND") ? RAST_LINE_CAP_ROUND 
+			: 0 == strcmp(strokeCap, "SQUARE") ? RAST_LINE_CAP_SQUARE : RAST_LINE_CAP_FLAT;
+		// TODO Dashed; arrows.
+		// TODO For internal opaque strokes, prevent the fill's colour leaking outside into the antialiasing of the stroke.
+
+		while (*copy) {
+			const char *n = copy;
+			strtol(copy, &copy, 10);
+			if (*copy == ',') { *copy = 0; copy++; }
+
+			uint32_t *image = nullptr;
+			RastPaint paint = LoadPaint(shget(nodes, n), matrix, width, height, &image);
+			RastSurfaceFill(surface, RastShapeCreateContour(&path, contourStyle, false), paint, false);
+			RastSurfaceFill(mask, RastShapeCreateContour(&path, contourStyle, false), { .type = RAST_PAINT_MAXIMUM_A }, false);
+			RastGradientDestroy(&paint);
+			free(image);
+		}
+
+		free(copyBase);
+	}
+
+	// Render text.
+
+	if (0 == strcmp(type, "TEXT")) {
 		// TODO This needs to be converted to a vector path and rendered as other nodes!
 		// 	At the moment, things like gradients, strokes, rotations, etc. don't work.
 		// TODO Something's off with the kerning/hinting...
@@ -669,77 +881,20 @@ void RenderNode(const char *id, float drawXOffset, float drawYOffset, Image *des
 		arrfree(string);
 	}
 
-	// Render fills.
-
-	if (fills) {
-		char *copy = strdup(fills);
-		char *copyBase = copy;
-
-		while (*copy) {
-			const char *n = copy;
-			strtol(copy, &copy, 10);
-			if (*copy == ',') { *copy = 0; copy++; }
-
-			uint32_t *image = nullptr;
-			RastPaint paint = LoadPaint(shget(nodes, n), matrix, width, height, &image);
-			RastSurfaceFill(surface, RastShapeCreateSolid(&path), paint, evenOdd);
-			RastSurfaceFill(mask, RastShapeCreateSolid(&path), { .type = RAST_PAINT_MAXIMUM_A }, evenOdd);
-			RastGradientDestroy(&paint);
-			free(image);
-		}
-
-		free(copyBase);
-	}
-
-	// Render strokes.
-
-	if (strokes) {
-		char *copy = strdup(strokes);
-		char *copyBase = copy;
-
-		float strokeWeight = atof(shget(p, "strokeWeight"));
-		const char *strokeAlign = shget(p, "strokeAlign");
-		const char *strokeJoin = shget(p, "strokeJoin");
-		const char *strokeCap = shget(p, "strokeCap");
-
-		contourStyle.internalWidth = 0 == strcmp(strokeAlign, "INSIDE") ? strokeWeight 
-			: 0 == strcmp(strokeAlign, "CENTER") ? strokeWeight * 0.5f : 0.0f;
-		contourStyle.externalWidth = 0 == strcmp(strokeAlign, "OUTSIDE") ? strokeWeight 
-			: 0 == strcmp(strokeAlign, "CENTER") ? strokeWeight * 0.5f : 0.0f;
-		contourStyle.miterLimit = 0 == strcmp(strokeJoin, "BEVEL") ? 0.0f : atof(shget(p, "strokeMiterLimit"));
-		contourStyle.joinMode = 0 == strcmp(strokeJoin, "ROUND") ? RAST_LINE_JOIN_ROUND : RAST_LINE_JOIN_MITER;
-		contourStyle.capMode = 0 == strcmp(strokeCap, "ROUND") ? RAST_LINE_CAP_ROUND 
-			: 0 == strcmp(strokeCap, "SQUARE") ? RAST_LINE_CAP_SQUARE : RAST_LINE_CAP_FLAT;
-		// TODO Dashed; arrows.
-		// TODO For internal opaque strokes, prevent the fill's colour leaking outside into the antialiasing of the stroke.
-
-		while (*copy) {
-			const char *n = copy;
-			strtol(copy, &copy, 10);
-			if (*copy == ',') { *copy = 0; copy++; }
-
-			uint32_t *image = nullptr;
-			RastPaint paint = LoadPaint(shget(nodes, n), matrix, width, height, &image);
-			RastSurfaceFill(surface, RastShapeCreateContour(&path, contourStyle, false), paint, false);
-			RastSurfaceFill(mask, RastShapeCreateContour(&path, contourStyle, false), { .type = RAST_PAINT_MAXIMUM_A }, false);
-			RastGradientDestroy(&paint);
-			free(image);
-		}
-
-		free(copyBase);
-	}
-
 	// Render the children.
 
 	if (children) {
 		char *copy = strdup(children);
 		char *copyBase = copy;
 
+		float originX = atof(shget(p, "absoluteTransform02")) - padL;
+		float originY = atof(shget(p, "absoluteTransform12")) - padT;
+
 		while (*copy) {
 			const char *n = copy;
 			strtol(copy, &copy, 10);
 			if (*copy == ',') { *copy = 0; copy++; }
-			RenderNode(n, drawXOffset, drawYOffset, &bitmap);
+			RenderNode(n, &bitmap2, &bitmap, nullptr, originX, originY);
 		}
 
 		free(copyBase);
@@ -909,16 +1064,49 @@ void RenderNode(const char *id, float drawXOffset, float drawYOffset, Image *des
 
 	// Blit on the destination image.
 
-	// TODO Blend modes.
-	float opacity = atof(shget(p, "opacity"));
-	Blit(destinationBitmap, &bitmap, 0, 0, true, opacity);
+	if (destinationBitmap) {
+		float opacity = atof(shget(p, "opacity"));
+
+		if (0 == strcmp("true", shget(p, "isMask"))) {
+			memset(clipBitmap->bits, 0x00, sizeof(uint32_t) * clipBitmap->width * clipBitmap->height);
+			Blit(clipBitmap, &bitmap, offsetOnParentX, offsetOnParentY, true, opacity);
+		} else {
+			if (clipBitmap) {
+				for (int32_t y = 0; y < (int32_t) bitmap.height; y++) {
+					assert(0 <= y + (int32_t) offsetOnParentY && y + (int32_t) offsetOnParentY < (int32_t) clipBitmap->height);
+
+					for (int32_t x = 0; x < (int32_t) bitmap.width; x++) {
+						assert(0 <= x + (int32_t) offsetOnParentX && x + (int32_t) offsetOnParentX < (int32_t) clipBitmap->width);
+						uint32_t *pixel = &bitmap.bits[y * bitmap.width + x];
+						float original = (float) (*pixel >> 24) / 255.0f;
+						float clip = (float) (clipBitmap->bits[(y + (int32_t) offsetOnParentY) * clipBitmap->width 
+								+ (x + (int32_t) offsetOnParentX)] >> 24) / 255.0f;
+						uint32_t result = (uint32_t) (original * clip * 255.0f) << 24;
+						*pixel = (*pixel & 0xFFFFFF) | result;
+					}
+				}
+			}
+
+			// TODO Blend modes.
+			Blit(destinationBitmap, &bitmap, offsetOnParentX, offsetOnParentY, true, opacity);
+		}
+	} else if (destinationPath) {
+		for (uint32_t i = 0; i < bitmap.width * bitmap.height; i++) {
+			bitmap.bits[i] = (bitmap.bits[i] & 0xFF00FF00) | ((bitmap.bits[i] & 0xFF) << 16) | ((bitmap.bits[i] >> 16) & 0xFF);
+		}
+
+		stbi_write_png(destinationPath, bitmap.width, bitmap.height, 4, bitmap.bits, bitmap.width * 4);
+	} else {
+		assert(false);
+	}
 
 	// Free temporary data.
 
 	RastPathDestroy(&path);
-	free(bitmap.bits);
 	RastSurfaceDestroy(&surface);
 	RastSurfaceDestroy(&mask);
+	free(bitmap.bits);
+	free(bitmap2.bits);
 }
 
 int main(int argc, char **argv) {
@@ -1020,19 +1208,7 @@ int main(int argc, char **argv) {
 	}
 
 	if (node) {
-		Image bitmap = {};
-		bitmap.width = atoi(shget(node->value, "width"));
-		bitmap.height = atoi(shget(node->value, "height"));
-		bitmap.bits = (uint32_t *) calloc(sizeof(uint32_t), bitmap.width * bitmap.height);
-		RenderNode(node->key, -atof(shget(node->value, "absoluteTransform02")), 
-				-atof(shget(node->value, "absoluteTransform12")), &bitmap);
-
-		for (uint32_t i = 0; i < bitmap.width * bitmap.height; i++) {
-			bitmap.bits[i] = (bitmap.bits[i] & 0xFF00FF00) | ((bitmap.bits[i] & 0xFF) << 16) | ((bitmap.bits[i] >> 16) & 0xFF);
-		}
-
-		stbi_write_png(argv[3], bitmap.width, bitmap.height, 4, bitmap.bits, bitmap.width * 4);
-		free(bitmap.bits);
+		RenderNode(node->key, nullptr, nullptr, argv[3], 0.0f, 0.0f);
 	} else {
 		fprintf(stderr, "Error: Node '%s' was not found in the input file.\n", argv[2]);
 		return 1;
