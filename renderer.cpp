@@ -534,6 +534,20 @@ void ComputeNodeDrawBounds(const char *id, float *_padL, float *_padR, float *_p
 	if (_padB) *_padB = ceilf(padB);
 }
 
+void BlitWithMask(Image *destination, Image *mask, Image *source) {
+	for (int32_t y = 0; y < (int32_t) mask->height; y++) {
+		for (int32_t x = 0; x < (int32_t) mask->width; x++) {
+			uint32_t *pixel = &source->bits[y * source->width + x];
+			float original = (float) (*pixel >> 24) / 255.0f;
+			float clip = (float) (mask->bits[y * mask->width + x] >> 24) / 255.0f;
+			uint32_t result = (uint32_t) (original * clip * 255.0f) << 24;
+			*pixel = (*pixel & 0xFFFFFF) | result;
+		}
+	}
+
+	Blit(destination, source, 0, 0, true, 1.0f);
+}
+
 void RenderNode(const char *id, Image *clipBitmap, Image *destinationBitmap, const char *destinationPath, float parentOriginX, float parentOriginY) {
 	// TODO Clipping (including frames).
 	// TODO Gradient dithering.
@@ -696,7 +710,7 @@ void RenderNode(const char *id, Image *clipBitmap, Image *destinationBitmap, con
 	Image bitmap = {};
 	bitmap.width = ceilf(width) + padL + padR;
 	bitmap.height = ceilf(height) + padT + padB;
-	bitmap.bits = (uint32_t *) calloc(4, bitmap.width * bitmap.height);
+	bitmap.bits = (uint32_t *) calloc(1, 4 * bitmap.width * bitmap.height);
 	RastSurface surface = {};
 	surface.buffer = (uint32_t *) bitmap.bits;
 	surface.stride = bitmap.width * 4;
@@ -707,8 +721,12 @@ void RenderNode(const char *id, Image *clipBitmap, Image *destinationBitmap, con
 	Image bitmap2 = {};
 	bitmap2.width = bitmap.width;
 	bitmap2.height = bitmap.height;
-	bitmap2.bits = (uint32_t *) calloc(4, bitmap.width * bitmap.height);
-	memset(bitmap2.bits, 0xFF, 4 * bitmap.width * bitmap.height);
+	bitmap2.bits = (uint32_t *) malloc(4 * bitmap.width * bitmap.height);
+
+	Image bitmap3 = {};
+	bitmap3.width = bitmap.width;
+	bitmap3.height = bitmap.height;
+	bitmap3.bits = (uint32_t *) calloc(1, 4 * bitmap.width * bitmap.height);
 
 	// Render fills.
 
@@ -890,11 +908,30 @@ void RenderNode(const char *id, Image *clipBitmap, Image *destinationBitmap, con
 		float originX = atof(shget(p, "absoluteTransform02")) - padL;
 		float originY = atof(shget(p, "absoluteTransform12")) - padT;
 
+		bool hasMask = false;
+
 		while (*copy) {
 			const char *n = copy;
 			strtol(copy, &copy, 10);
 			if (*copy == ',') { *copy = 0; copy++; }
-			RenderNode(n, &bitmap2, &bitmap, nullptr, originX, originY);
+
+			bool isMask = 0 == strcmp(shget(shget(nodes, n), "visible"), "true")
+				&& 0 == strcmp(shget(shget(nodes, n), "isMask"), "true");
+
+			if (isMask && hasMask) {
+				BlitWithMask(&bitmap, &bitmap2, &bitmap3);
+				memset(bitmap3.bits, 0, sizeof(uint32_t) * bitmap3.width * bitmap3.height);
+			}
+
+			RenderNode(n, &bitmap2, hasMask ? &bitmap3 : &bitmap, nullptr, originX, originY);
+
+			if (isMask && !hasMask) {
+				hasMask = true;
+			}
+		}
+
+		if (hasMask) {
+			BlitWithMask(&bitmap, &bitmap2, &bitmap3);
 		}
 
 		free(copyBase);
@@ -1064,29 +1101,16 @@ void RenderNode(const char *id, Image *clipBitmap, Image *destinationBitmap, con
 
 	// Blit on the destination image.
 
+	bool isMask = 0 == strcmp("true", shget(p, "isMask"));
+
 	if (destinationBitmap) {
 		float opacity = atof(shget(p, "opacity"));
 
-		if (0 == strcmp("true", shget(p, "isMask"))) {
+		if (clipBitmap && isMask) {
+			// TODO isMaskOutline property.
 			memset(clipBitmap->bits, 0x00, sizeof(uint32_t) * clipBitmap->width * clipBitmap->height);
 			Blit(clipBitmap, &bitmap, offsetOnParentX, offsetOnParentY, true, opacity);
 		} else {
-			if (clipBitmap) {
-				for (int32_t y = 0; y < (int32_t) bitmap.height; y++) {
-					assert(0 <= y + (int32_t) offsetOnParentY && y + (int32_t) offsetOnParentY < (int32_t) clipBitmap->height);
-
-					for (int32_t x = 0; x < (int32_t) bitmap.width; x++) {
-						assert(0 <= x + (int32_t) offsetOnParentX && x + (int32_t) offsetOnParentX < (int32_t) clipBitmap->width);
-						uint32_t *pixel = &bitmap.bits[y * bitmap.width + x];
-						float original = (float) (*pixel >> 24) / 255.0f;
-						float clip = (float) (clipBitmap->bits[(y + (int32_t) offsetOnParentY) * clipBitmap->width 
-								+ (x + (int32_t) offsetOnParentX)] >> 24) / 255.0f;
-						uint32_t result = (uint32_t) (original * clip * 255.0f) << 24;
-						*pixel = (*pixel & 0xFFFFFF) | result;
-					}
-				}
-			}
-
 			// TODO Blend modes.
 			Blit(destinationBitmap, &bitmap, offsetOnParentX, offsetOnParentY, true, opacity);
 		}
@@ -1107,6 +1131,7 @@ void RenderNode(const char *id, Image *clipBitmap, Image *destinationBitmap, con
 	RastSurfaceDestroy(&mask);
 	free(bitmap.bits);
 	free(bitmap2.bits);
+	free(bitmap3.bits);
 }
 
 int main(int argc, char **argv) {
