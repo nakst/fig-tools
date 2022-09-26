@@ -105,9 +105,6 @@ void *LoadFile(const char *path, size_t *length) {
 }
 
 void BlendPixel(uint32_t *destinationPixel, uint32_t modified) {
-	// TODO Is Figma doing gamma-correct blending?
-	// 	textlib will also need to be updated if so.
-
 	float under0 = (float) ((*destinationPixel >>  0) & 0xFF) / 255.0f;
 	float under1 = (float) ((*destinationPixel >>  8) & 0xFF) / 255.0f;
 	float under2 = (float) ((*destinationPixel >> 16) & 0xFF) / 255.0f;
