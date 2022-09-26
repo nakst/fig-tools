@@ -681,10 +681,10 @@ void _RastShapeCreateContour(RastShape *shape, RastVertex *vertices, size_t vert
 					*p2 = &vertices[(i / 2 + 1) % vertexCount],
 					*p3 = &vertices[(i / 2 + 2) % vertexCount];
 				float cross = (p2->x - p1->x) * (p3->y - p2->y) - (p2->y - p1->y) * (p3->x - p2->x);
-				
+
 				_RastJoinMeter(&path2, &path1[i], &path1[i + 1], &path1[(i + 2) % RAST_ARRAY_LENGTH(path1)], 
 					&path1[(i + 3) % RAST_ARRAY_LENGTH(path1)], &vertices[(i / 2 + 1) % vertexCount], 
-					(internal ? (cross > 0) : (cross < 0)) ? (style.miterLimit + width) : INFINITY);
+					(internal ? (cross > 0) : (cross < 0)) ? (style.miterLimit * width) : INFINITY);
 			}
 		} else if (style.joinMode == RAST_LINE_JOIN_ROUND) {
 			int divisions = ceilf(3.14159265358f * 0.5f / acosf(width / (width + RAST_ROUND_TOLERANCE))) + 1;

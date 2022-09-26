@@ -488,6 +488,11 @@ void ComputeNodeDrawBounds(const char *id, float *_padL, float *_padR, float *_p
 		padR += strokeWeight;
 		padT += strokeWeight;
 		padB += strokeWeight;
+		float miterLimit = 0 == strcmp(shget(p, "strokeJoin"), "MITER") ? atof(shget(p, "strokeMiterLimit")) : 0.0f;
+		padL += miterLimit * sqrtf(2.0f);
+		padR += miterLimit * sqrtf(2.0f);
+		padT += miterLimit * sqrtf(2.0f);
+		padB += miterLimit * sqrtf(2.0f);
 	}
 
 	if (effects) {
