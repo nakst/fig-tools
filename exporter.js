@@ -1,5 +1,3 @@
-// TODO Download the result as a file, rather than making the user copy and paste the message out.
-
 var outText = "";
 var objectIDAllocator = 1;
 
@@ -229,4 +227,14 @@ async function DumpNode(node, parentID) {
 }
 
 await DumpNode(figma.root, 0);
-console.log(outText);
+
+var blob = new Blob([outText], { type: "text/plain" });
+var url = window.URL.createObjectURL(blob);
+var a = document.createElement('a');
+a.href = url;
+a.download = "fig-export.ini";
+document.body.appendChild(a);
+a.style = 'display: none';
+a.click();
+a.remove();
+setTimeout(function() { return window.URL.revokeObjectURL(url); }, 1000);
